@@ -1,0 +1,108 @@
+#!/bin/bash
+# darktable-nas-progress - Monitor thumbnail generation progress
+
+LOCAL_DB_DIR="${LOCAL_DB_DIR:-$HOME/.local/share/darktable-nas}"
+LOCAL_CACHE_DIR="${LOCAL_CACHE_DIR:-$HOME/.cache/darktable}"
+
+# Calculate cache hash for local database
+LOCAL_DB_PATH="$LOCAL_DB_DIR/library.db"
+CACHE_HASH=$(echo -n "$LOCAL_DB_PATH" | sha1sum | cut -d' ' -f1)
+CACHE_DIR="$LOCAL_CACHE_DIR/mipmaps-${CACHE_HASH}.d"
+
+# Get total photos from database
+get_total_photos() {
+    sqlite3 "$LOCAL_DB_DIR/library.db" "SELECT COUNT(*) FROM images;" 2>/dev/null || echo "0"
+}
+
+# Get current thumbnail count
+get_thumbnail_count() {
+    find "$CACHE_DIR" -type f 2>/dev/null | wc -l
+}
+
+# Get cache size
+get_cache_size() {
+    du -sh "$CACHE_DIR" 2>/dev/null | cut -f1
+}
+
+# Draw progress bar
+draw_progress_bar() {
+    local current=$1
+    local total=$2
+    local width=50
+
+    if [[ $total -eq 0 ]]; then
+        percent=0
+        filled=0
+    else
+        percent=$((current * 100 / total))
+        filled=$((current * width / total))
+    fi
+
+    local empty=$((width - filled))
+
+    # Build the bar
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+
+    printf "\r[%s] %3d%% (%d/%d) - %s" "$bar" "$percent" "$current" "$total" "$3"
+}
+
+# Main
+echo "Darktable Thumbnail Progress Monitor"
+echo "====================================="
+echo "Cache: $CACHE_DIR"
+echo ""
+
+TOTAL=$(get_total_photos)
+if [[ "$TOTAL" == "0" ]]; then
+    echo "Error: Could not read database or no photos found"
+    exit 1
+fi
+
+echo "Total photos in library: $TOTAL"
+echo ""
+echo "Press Ctrl+C to stop monitoring"
+echo ""
+
+LAST_COUNT=0
+LAST_TIME=$(date +%s)
+
+while true; do
+    CURRENT=$(get_thumbnail_count)
+    SIZE=$(get_cache_size)
+
+    # Calculate rate
+    NOW=$(date +%s)
+    ELAPSED=$((NOW - LAST_TIME))
+    if [[ $ELAPSED -gt 0 ]] && [[ $LAST_COUNT -gt 0 ]]; then
+        RATE=$(( (CURRENT - LAST_COUNT) * 60 / ELAPSED ))
+        REMAINING=$((TOTAL - CURRENT))
+        if [[ $RATE -gt 0 ]]; then
+            ETA_MINS=$((REMAINING / RATE))
+            ETA_STR="${ETA_MINS}m remaining"
+        else
+            ETA_STR="calculating..."
+        fi
+    else
+        ETA_STR="calculating..."
+    fi
+
+    draw_progress_bar "$CURRENT" "$TOTAL" "$SIZE - $ETA_STR"
+
+    # Check if complete
+    if [[ $CURRENT -ge $TOTAL ]]; then
+        echo ""
+        echo ""
+        echo "Complete! All thumbnails generated."
+        exit 0
+    fi
+
+    # Update rate tracking every 30 seconds
+    if [[ $ELAPSED -ge 30 ]]; then
+        LAST_COUNT=$CURRENT
+        LAST_TIME=$NOW
+    fi
+
+    sleep 15
+done

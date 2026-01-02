@@ -1,0 +1,48 @@
+# darktable-nas configuration
+# Copy this file to ~/.config/darktable-nas/darktable-nas.conf and edit
+
+# =============================================================================
+# NAS CONNECTION
+# =============================================================================
+
+# Local network IP of your NAS (used when on the same network)
+NAS_HOST_LOCAL="192.168.1.100"
+
+# Tailscale IP of your NAS (used when away from home)
+NAS_HOST_TAILSCALE="100.100.100.100"
+
+# SMB/CIFS share path on your NAS
+NAS_SHARE="/home"
+
+# Where to mount the NAS locally
+NAS_MOUNT="/mnt/synology"
+
+# Path to darktable database directory (relative to NAS_MOUNT)
+NAS_DB_PATH="darktable-db"
+
+# Path to photos directory (relative to NAS_MOUNT)
+NAS_PHOTOS_PATH="raws"
+
+# =============================================================================
+# CREDENTIALS
+# =============================================================================
+
+# Path to CIFS credentials file
+# Create this file with:
+#   sudo mkdir -p /etc/cifs-credentials
+#   echo -e "username=YOUR_USER\npassword=YOUR_PASS" | sudo tee /etc/cifs-credentials/synology
+#   sudo chmod 600 /etc/cifs-credentials/synology
+CIFS_CREDENTIALS="/etc/cifs-credentials/synology"
+
+# =============================================================================
+# LOCAL PATHS
+# =============================================================================
+
+# Where to store the local database copy
+LOCAL_DB_DIR="$HOME/.local/share/darktable-nas"
+
+# Where to store local darktable configuration
+LOCAL_CONFIG_DIR="$HOME/.config/darktable-nas"
+
+# Where darktable stores its cache (thumbnails, etc.)
+LOCAL_CACHE_DIR="$HOME/.cache/darktable"
