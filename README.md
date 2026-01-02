@@ -163,7 +163,14 @@ sudo mount -t cifs //192.168.1.100/photos /mnt/nas -o credentials=/etc/cifs-cred
 
 ## Configuration Reference
 
-### darktable-nas.conf
+All settings can be configured via the config file (`~/.config/darktable-nas/darktable-nas.conf`) or as environment variables. Environment variables take precedence over the config file.
+
+```bash
+# Example: override mount point via environment variable
+NAS_MOUNT=/mnt/photos darktable-nas
+```
+
+### Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -173,9 +180,11 @@ sudo mount -t cifs //192.168.1.100/photos /mnt/nas -o credentials=/etc/cifs-cred
 | `NAS_MOUNT` | `/mnt/synology` | Local mount point |
 | `NAS_DB_PATH` | `darktable-db` | Database directory on NAS |
 | `NAS_PHOTOS_PATH` | `raws` | Photos directory on NAS |
-| `CIFS_CREDENTIALS` | `/etc/cifs-credentials/synology` | SMB credentials file |
+| `CIFS_CREDENTIALS` | `/etc/cifs-credentials/synology` | Path to SMB credentials file |
 | `LOCAL_DB_DIR` | `~/.local/share/darktable-nas` | Local database cache |
 | `LOCAL_CONFIG_DIR` | `~/.config/darktable-nas` | Local config directory |
+| `LOCAL_CACHE_DIR` | `~/.cache/darktable` | Local thumbnail cache |
+| `DEBUG` | (unset) | Set to `1` to enable debug output |
 
 ## License
 
