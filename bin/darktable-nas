@@ -12,17 +12,29 @@ set -euo pipefail
 
 VERSION="1.0.0"
 
+# === PLATFORM DETECTION ===
+case "$(uname -s)" in
+    Linux)  PLATFORM="linux" ;;
+    Darwin) PLATFORM="macos" ;;
+    *)      echo "Unsupported platform: $(uname -s)" >&2; exit 1 ;;
+esac
+
 # === DEFAULT CONFIGURATION ===
 # These can be overridden in ~/.config/darktable-nas/darktable-nas.conf
 
 NAS_HOST_LOCAL="${NAS_HOST_LOCAL:-192.168.1.100}"
 NAS_HOST_TAILSCALE="${NAS_HOST_TAILSCALE:-100.100.100.100}"
 NAS_SHARE="${NAS_SHARE:-/home}"
-NAS_MOUNT="${NAS_MOUNT:-/mnt/synology}"
 NAS_DB_PATH="${NAS_DB_PATH:-darktable-db}"
 NAS_PHOTOS_PATH="${NAS_PHOTOS_PATH:-raws}"
 
-CIFS_CREDENTIALS="${CIFS_CREDENTIALS:-/etc/cifs-credentials/synology}"
+# Platform-specific defaults
+if [[ "$PLATFORM" == "macos" ]]; then
+    NAS_MOUNT="${NAS_MOUNT:-/Volumes/NAS}"
+else
+    NAS_MOUNT="${NAS_MOUNT:-/mnt/NAS}"
+    CIFS_CREDENTIALS="${CIFS_CREDENTIALS:-/etc/cifs-credentials/NAS}"
+fi
 
 LOCAL_DB_DIR="${LOCAL_DB_DIR:-$HOME/.local/share/darktable-nas}"
 LOCAL_CONFIG_DIR="${LOCAL_CONFIG_DIR:-$HOME/.config/darktable-nas}"
@@ -56,6 +68,37 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 log_debug() { [[ "${DEBUG:-}" == "1" ]] && echo -e "${BLUE}[DEBUG]${NC} $*" || true; }
 
+# === MACOS KEYCHAIN HELPERS ===
+
+KEYCHAIN_USER=""
+KEYCHAIN_PASS=""
+
+get_keychain_credentials() {
+    local host="$1"
+    KEYCHAIN_USER=$(security find-internet-password -s "$host" 2>/dev/null | grep "acct" | cut -d'"' -f4)
+    KEYCHAIN_PASS=$(security find-internet-password -s "$host" -w 2>/dev/null)
+}
+
+urlencode() {
+    python3 -c "import urllib.parse; print(urllib.parse.quote('''$1''', safe=''))"
+}
+
+setup_keychain() {
+    log_info "Setting up Keychain credentials for NAS..."
+    read -rp "NAS Username: " username
+    read -rsp "NAS Password: " password
+    echo
+
+    # Store credentials for both local and Tailscale hosts
+    # -U updates existing entry if present
+    security add-internet-password -a "$username" -s "$NAS_HOST_LOCAL" -w "$password" -U 2>/dev/null || \
+        security add-internet-password -a "$username" -s "$NAS_HOST_LOCAL" -w "$password"
+    security add-internet-password -a "$username" -s "$NAS_HOST_TAILSCALE" -w "$password" -U 2>/dev/null || \
+        security add-internet-password -a "$username" -s "$NAS_HOST_TAILSCALE" -w "$password"
+
+    log_info "Credentials stored in Keychain"
+}
+
 # === HELPER FUNCTIONS ===
 
 show_help() {
@@ -70,6 +113,7 @@ Options:
     -d, --debug         Enable debug output
     --status            Show connection status and exit
     --unlock            Force remove lock files and exit
+    --setup-keychain    Store NAS credentials in macOS Keychain (macOS only)
 
 Environment:
     Configuration is loaded from:
@@ -98,7 +142,22 @@ load_config() {
 
 # === TAILSCALE FUNCTIONS ===
 
+check_tailscale_macos() {
+    if ! command -v tailscale &>/dev/null; then
+        log_warn "Tailscale CLI not found"
+        return 1
+    fi
+    if tailscale status 2>&1 | grep -q "Tailscale is stopped"; then
+        log_warn "Tailscale not running. Enable it from the menu bar."
+        return 1
+    fi
+    return 0
+}
+
 start_tailscale() {
+    # macOS: Tailscale is managed by menu bar app
+    [[ "$PLATFORM" == "macos" ]] && return 0
+
     if ! systemctl is-active --quiet tailscaled 2>/dev/null; then
         log_info "Starting Tailscale daemon..."
         if sudo systemctl start tailscaled; then
@@ -116,6 +175,9 @@ start_tailscale() {
 }
 
 stop_tailscale() {
+    # macOS: Tailscale is managed by menu bar app
+    [[ "$PLATFORM" == "macos" ]] && return 0
+
     if [[ "$TAILSCALE_STARTED" == true ]]; then
         log_info "Stopping Tailscale..."
         sudo tailscale down 2>/dev/null || true
@@ -126,7 +188,11 @@ stop_tailscale() {
 # === MOUNT FUNCTIONS ===
 
 is_mounted() {
-    mountpoint -q "$NAS_MOUNT" 2>/dev/null
+    if [[ "$PLATFORM" == "macos" ]]; then
+        mount | grep -q " on ${NAS_MOUNT} "
+    else
+        mountpoint -q "$NAS_MOUNT" 2>/dev/null
+    fi
 }
 
 get_connection_type() {
@@ -147,32 +213,74 @@ mount_nas() {
     fi
 
     log_info "Mounting NAS..."
-    sudo mkdir -p "$NAS_MOUNT"
 
-    # Try local network first
-    log_debug "Trying local network mount ($NAS_HOST_LOCAL)..."
-    local mount_opts="credentials=$CIFS_CREDENTIALS,$CIFS_OPTS_BASE,$CIFS_OPTS_LOCAL"
+    if [[ "$PLATFORM" == "macos" ]]; then
+        # macOS: Use mount_smbfs with Keychain credentials
+        mkdir -p "$NAS_MOUNT" 2>/dev/null || sudo mkdir -p "$NAS_MOUNT"
 
-    if sudo mount -t cifs "//$NAS_HOST_LOCAL$NAS_SHARE" "$NAS_MOUNT" -o "$mount_opts" 2>/dev/null; then
-        CONNECTION_TYPE="local"
-        echo "$NAS_HOST_LOCAL" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
-        log_info "Connected via local network"
-        sleep 1
-        return 0
-    fi
+        # Try local network first
+        log_debug "Trying local network mount ($NAS_HOST_LOCAL)..."
+        get_keychain_credentials "$NAS_HOST_LOCAL"
+        if [[ -z "$KEYCHAIN_USER" ]] || [[ -z "$KEYCHAIN_PASS" ]]; then
+            log_error "Credentials not found in Keychain"
+            log_info "Run: darktable-nas --setup-keychain"
+            return 1
+        fi
 
-    # Fall back to Tailscale
-    log_info "Local network unavailable, trying Tailscale..."
-    start_tailscale || true
+        local encoded_pass
+        encoded_pass=$(urlencode "$KEYCHAIN_PASS")
 
-    mount_opts="credentials=$CIFS_CREDENTIALS,$CIFS_OPTS_BASE,$CIFS_OPTS_TAILSCALE"
+        if mount_smbfs "//${KEYCHAIN_USER}:${encoded_pass}@${NAS_HOST_LOCAL}${NAS_SHARE}" "$NAS_MOUNT" 2>/dev/null; then
+            CONNECTION_TYPE="local"
+            echo "$NAS_HOST_LOCAL" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
+            log_info "Connected via local network"
+            sleep 1
+            return 0
+        fi
 
-    if sudo mount -t cifs "//$NAS_HOST_TAILSCALE$NAS_SHARE" "$NAS_MOUNT" -o "$mount_opts" 2>/dev/null; then
-        CONNECTION_TYPE="tailscale"
-        echo "$NAS_HOST_TAILSCALE" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
-        log_info "Connected via Tailscale"
-        sleep 1
-        return 0
+        # Fall back to Tailscale
+        log_info "Local network unavailable, trying Tailscale..."
+        check_tailscale_macos || log_warn "Tailscale may not be running"
+
+        get_keychain_credentials "$NAS_HOST_TAILSCALE"
+        encoded_pass=$(urlencode "$KEYCHAIN_PASS")
+
+        if mount_smbfs "//${KEYCHAIN_USER}:${encoded_pass}@${NAS_HOST_TAILSCALE}${NAS_SHARE}" "$NAS_MOUNT" 2>/dev/null; then
+            CONNECTION_TYPE="tailscale"
+            echo "$NAS_HOST_TAILSCALE" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
+            log_info "Connected via Tailscale"
+            sleep 1
+            return 0
+        fi
+    else
+        # Linux: Use mount -t cifs with credentials file
+        sudo mkdir -p "$NAS_MOUNT"
+
+        # Try local network first
+        log_debug "Trying local network mount ($NAS_HOST_LOCAL)..."
+        local mount_opts="credentials=$CIFS_CREDENTIALS,$CIFS_OPTS_BASE,$CIFS_OPTS_LOCAL"
+
+        if sudo mount -t cifs "//$NAS_HOST_LOCAL$NAS_SHARE" "$NAS_MOUNT" -o "$mount_opts" 2>/dev/null; then
+            CONNECTION_TYPE="local"
+            echo "$NAS_HOST_LOCAL" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
+            log_info "Connected via local network"
+            sleep 1
+            return 0
+        fi
+
+        # Fall back to Tailscale
+        log_info "Local network unavailable, trying Tailscale..."
+        start_tailscale || true
+
+        mount_opts="credentials=$CIFS_CREDENTIALS,$CIFS_OPTS_BASE,$CIFS_OPTS_TAILSCALE"
+
+        if sudo mount -t cifs "//$NAS_HOST_TAILSCALE$NAS_SHARE" "$NAS_MOUNT" -o "$mount_opts" 2>/dev/null; then
+            CONNECTION_TYPE="tailscale"
+            echo "$NAS_HOST_TAILSCALE" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
+            log_info "Connected via Tailscale"
+            sleep 1
+            return 0
+        fi
     fi
 
     log_error "Failed to mount NAS"
@@ -183,8 +291,66 @@ unmount_nas() {
     log_info "Unmounting NAS..."
     sync
     sleep 1
-    sudo umount "$NAS_MOUNT" 2>/dev/null || log_warn "Could not unmount cleanly"
+    if [[ "$PLATFORM" == "macos" ]]; then
+        umount "$NAS_MOUNT" 2>/dev/null || sudo umount "$NAS_MOUNT" 2>/dev/null || log_warn "Could not unmount cleanly"
+    else
+        sudo umount "$NAS_MOUNT" 2>/dev/null || log_warn "Could not unmount cleanly"
+    fi
     sudo rm -f /var/run/darktable-nas-mount-ip
+}
+
+# === PLATFORM UTILITY WRAPPERS ===
+
+get_file_mtime() {
+    if [[ "$PLATFORM" == "macos" ]]; then
+        stat -f %m "$1" 2>/dev/null || echo "0"
+    else
+        stat -c %Y "$1" 2>/dev/null || echo "0"
+    fi
+}
+
+get_sha1() {
+    if [[ "$PLATFORM" == "macos" ]]; then
+        echo -n "$1" | shasum -a 1 | cut -d' ' -f1
+    else
+        echo -n "$1" | sha1sum | cut -d' ' -f1
+    fi
+}
+
+sed_inplace() {
+    if [[ "$PLATFORM" == "macos" ]]; then
+        sed -i '' "$@"
+    else
+        sed -i "$@"
+    fi
+}
+
+get_script_dir() {
+    if [[ "$PLATFORM" == "macos" ]]; then
+        local source="${BASH_SOURCE[0]}"
+        while [[ -L "$source" ]]; do
+            local dir
+            dir="$(cd -P "$(dirname "$source")" && pwd)"
+            source="$(readlink "$source")"
+            [[ "$source" != /* ]] && source="$dir/$source"
+        done
+        cd -P "$(dirname "$source")" && pwd
+    else
+        dirname "$(readlink -f "$0")"
+    fi
+}
+
+get_darktable_bin() {
+    if [[ "$PLATFORM" == "macos" ]]; then
+        for path in "/opt/homebrew/bin/darktable" "/usr/local/bin/darktable" \
+                    "/Applications/darktable.app/Contents/MacOS/darktable"; do
+            [[ -x "$path" ]] && echo "$path" && return
+        done
+        log_error "darktable not found. Install via Homebrew or download from darktable.org"
+        exit 1
+    else
+        echo "/usr/bin/darktable"
+    fi
 }
 
 # === LOCK FUNCTIONS ===
@@ -252,7 +418,7 @@ sync_from_nas() {
 
     # Record NAS modification time for conflict detection
     if [[ -f "$NAS_DB_DIR/library.db" ]]; then
-        stat -c %Y "$NAS_DB_DIR/library.db" > "$LOCAL_DB_DIR/.nas_sync_time" 2>/dev/null || true
+        get_file_mtime "$NAS_DB_DIR/library.db" > "$LOCAL_DB_DIR/.nas_sync_time"
     fi
 
     # Sync ONLY database files (not config!)
@@ -283,7 +449,7 @@ sync_to_nas() {
     if [[ -f "$LOCAL_DB_DIR/.nas_sync_time" ]] && [[ -f "$NAS_DB_DIR/library.db" ]]; then
         local stored_time current_time
         stored_time=$(cat "$LOCAL_DB_DIR/.nas_sync_time" 2>/dev/null || echo "0")
-        current_time=$(stat -c %Y "$NAS_DB_DIR/library.db" 2>/dev/null || echo "0")
+        current_time=$(get_file_mtime "$NAS_DB_DIR/library.db")
 
         if [[ "$stored_time" != "$current_time" ]] && [[ "$stored_time" != "0" ]]; then
             log_warn "CONFLICT: NAS database was modified during this session!"
@@ -316,7 +482,7 @@ init_local_config() {
         log_debug "Local darktable config exists"
         # Ensure crawler is disabled (in case user enabled it)
         if grep -q "run_crawler_on_start=TRUE" "$LOCAL_CONFIG_DIR/darktablerc" 2>/dev/null; then
-            sed -i 's/run_crawler_on_start=TRUE/run_crawler_on_start=FALSE/g' "$LOCAL_CONFIG_DIR/darktablerc"
+            sed_inplace 's/run_crawler_on_start=TRUE/run_crawler_on_start=FALSE/g' "$LOCAL_CONFIG_DIR/darktablerc"
             log_debug "Fixed run_crawler_on_start setting"
         fi
         return 0
@@ -326,10 +492,13 @@ init_local_config() {
 
     # Check for template in package directory
     local template=""
+    local script_dir
+    script_dir="$(get_script_dir)"
     for path in \
         "/usr/share/darktable-nas/darktablerc.template" \
         "/usr/local/share/darktable-nas/darktablerc.template" \
-        "$(dirname "$(readlink -f "$0")")/../config/darktablerc.template"
+        "/opt/homebrew/share/darktable-nas/darktablerc.template" \
+        "$script_dir/../config/darktablerc.template"
     do
         if [[ -f "$path" ]]; then
             template="$path"
@@ -371,7 +540,7 @@ setup_thumbnail_cache() {
     # Calculate expected cache hash for local database path
     local local_db_path="$LOCAL_DB_DIR/library.db"
     local local_hash nas_hash
-    local_hash=$(echo -n "$local_db_path" | sha1sum | cut -d' ' -f1)
+    local_hash=$(get_sha1 "$local_db_path")
 
     local local_cache_dir="$LOCAL_CACHE_DIR/mipmaps-${local_hash}.d"
 
@@ -384,7 +553,7 @@ setup_thumbnail_cache() {
 
     # Try to copy from NAS database cache
     local nas_db_path="$NAS_DB_DIR/library.db"
-    nas_hash=$(echo -n "$nas_db_path" | sha1sum | cut -d' ' -f1)
+    nas_hash=$(get_sha1 "$nas_db_path")
     local nas_cache_dir="$LOCAL_CACHE_DIR/mipmaps-${nas_hash}.d"
 
     if [[ -d "$nas_cache_dir" ]] && [[ "$(ls -A "$nas_cache_dir" 2>/dev/null | wc -l)" -gt 0 ]]; then
@@ -502,6 +671,15 @@ main() {
                 force_unlock
                 exit 0
                 ;;
+            --setup-keychain)
+                if [[ "$PLATFORM" != "macos" ]]; then
+                    log_error "--setup-keychain is only available on macOS"
+                    exit 1
+                fi
+                load_config
+                setup_keychain
+                exit 0
+                ;;
             --)
                 shift
                 dt_args+=("$@")
@@ -549,7 +727,10 @@ main() {
     log_info "Starting darktable..."
     export OMP_WAIT_POLICY=passive
 
-    /usr/bin/darktable \
+    local darktable_bin
+    darktable_bin="$(get_darktable_bin)"
+
+    "$darktable_bin" \
         --library "$LOCAL_DB_DIR/library.db" \
         --configdir "$LOCAL_CONFIG_DIR" \
         --conf run_crawler_on_start=FALSE \
