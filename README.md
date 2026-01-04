@@ -87,15 +87,42 @@ sudo mkdir -p /mnt/NAS
 
 ### macOS Setup
 
-#### 1. Store Credentials in Keychain
+#### 1. Create Cross-Platform Mount Point
+
+For database compatibility with Linux, macOS needs to mount at the same path (e.g., `/mnt/synology`). Since macOS has a read-only root filesystem, we use a synthetic firmlink:
+
+```bash
+# Create the synthetic firmlink (requires reboot)
+echo -e "mnt\tUsers/Shared/mnt" | sudo tee -a /etc/synthetic.conf
+
+# Reboot for the firmlink to take effect
+sudo reboot
+```
+
+After reboot, create the mount directory:
+
+```bash
+sudo mkdir -p /Users/Shared/mnt/synology
+```
+
+Now `/mnt/synology` will exist and point to `/Users/Shared/mnt/synology`.
+
+#### 2. Store Credentials in Keychain
 
 ```bash
 darktable-nas --setup-keychain
 ```
 
-This will prompt for your NAS username and password, and store them securely in the macOS Keychain.
+This prompts for your NAS username and password, storing them securely in the macOS Keychain.
 
-#### 2. Create User Configuration
+**Note:** If you've previously connected to your NAS via Finder, old Keychain entries may interfere. Delete them first:
+
+```bash
+security delete-internet-password -s "YOUR_NAS_IP"  # Run for each IP
+darktable-nas --setup-keychain
+```
+
+#### 3. Create User Configuration
 
 ```bash
 mkdir -p ~/.config/darktable-nas
@@ -105,16 +132,26 @@ cp /etc/darktable-nas/darktable-nas.conf.example ~/.config/darktable-nas/darktab
 Edit `~/.config/darktable-nas/darktable-nas.conf` with your NAS details:
 
 ```bash
-# NAS Configuration
+# NAS Configuration (use same mount path as Linux for database compatibility)
 NAS_HOST_LOCAL="192.168.1.100"        # Your NAS local IP
 NAS_HOST_TAILSCALE="100.x.x.x"        # Your NAS Tailscale IP
 NAS_SHARE="/photos"                    # SMB share name
-NAS_MOUNT="/Volumes/NAS"               # Local mount point (macOS default)
+NAS_MOUNT="/mnt/synology"              # Same path as Linux!
 NAS_DB_PATH="darktable-db"             # Path to darktable database on NAS
 NAS_PHOTOS_PATH="raws"                 # Path to photos on NAS
 ```
 
-#### 3. Install darktable
+#### 4. Configure darktable Import Path
+
+On first launch, set the import base directory to use the consistent mount path:
+
+1. Open darktable preferences (⌘,)
+2. Go to **Import** section
+3. Set **base directory pattern** to: `/mnt/synology/raws`
+
+This ensures new imports use the cross-platform compatible path.
+
+#### 5. Install darktable
 
 ```bash
 # Via Homebrew
@@ -123,7 +160,7 @@ brew install darktable
 # Or download from https://www.darktable.org/install/
 ```
 
-#### 4. Tailscale (Optional)
+#### 6. Tailscale (Optional)
 
 For remote access, install Tailscale from the Mac App Store or via Homebrew:
 
@@ -240,12 +277,44 @@ sudo mount -t cifs //192.168.1.100/photos /mnt/NAS -o credentials=/etc/cifs-cred
 Check Keychain credentials:
 
 ```bash
-# Verify credentials are stored
-security find-internet-password -s 192.168.1.100
+# Verify credentials are stored (use your NAS IP)
+security find-internet-password -s YOUR_NAS_IP
 
 # Re-run setup if needed
 darktable-nas --setup-keychain
 ```
+
+### "Credentials not found in Keychain" (macOS)
+
+This can happen if macOS created Keychain entries when you previously connected to your NAS via Finder. These old entries may have "No user account" and get found instead of the ones created by `--setup-keychain`.
+
+To fix, delete the old entries and re-run setup:
+
+```bash
+# Delete old entries for your NAS IPs (replace with your actual IPs)
+security delete-internet-password -s "YOUR_LOCAL_NAS_IP"
+security delete-internet-password -s "YOUR_TAILSCALE_NAS_IP"
+
+# Re-run setup
+darktable-nas --setup-keychain
+```
+
+You may need to run the delete command multiple times if there are multiple old entries for the same IP.
+
+### Photos Show Under Wrong Path (macOS)
+
+If photos appear under `/Users/Shared/mnt/synology` instead of `/mnt/synology`, this is because macOS resolved the synthetic firmlink to its real path. Fix the database directly:
+
+```bash
+# Fix both local and NAS databases
+sqlite3 ~/.local/share/darktable-nas/library.db \
+  "UPDATE film_rolls SET folder = REPLACE(folder, '/Users/Shared/mnt/synology', '/mnt/synology');"
+
+sqlite3 /mnt/synology/darktable-db/library.db \
+  "UPDATE film_rolls SET folder = REPLACE(folder, '/Users/Shared/mnt/synology', '/mnt/synology');"
+```
+
+Also ensure darktable's import base directory is set correctly (Preferences → Import → base directory pattern: `/mnt/synology/raws`).
 
 ## Configuration Reference
 
@@ -256,12 +325,14 @@ darktable-nas --setup-keychain
 | `NAS_HOST_LOCAL` | `192.168.1.100` | `192.168.1.100` | NAS IP on local network |
 | `NAS_HOST_TAILSCALE` | `100.100.100.100` | `100.100.100.100` | NAS IP via Tailscale |
 | `NAS_SHARE` | `/home` | `/home` | SMB share path |
-| `NAS_MOUNT` | `/mnt/NAS` | `/Volumes/NAS` | Local mount point |
+| `NAS_MOUNT` | `/mnt/NAS` | `/Volumes/NAS`* | Local mount point |
 | `NAS_DB_PATH` | `darktable-db` | `darktable-db` | Database directory on NAS |
 | `NAS_PHOTOS_PATH` | `raws` | `raws` | Photos directory on NAS |
 | `CIFS_CREDENTIALS` | `/etc/cifs-credentials/NAS` | N/A (Keychain) | SMB credentials file |
 | `LOCAL_DB_DIR` | `~/.local/share/darktable-nas` | `~/.local/share/darktable-nas` | Local database cache |
 | `LOCAL_CONFIG_DIR` | `~/.config/darktable-nas` | `~/.config/darktable-nas` | Local config directory |
+
+*For cross-platform database compatibility, set `NAS_MOUNT` to the same path on both Linux and macOS (e.g., `/mnt/synology`). See [macOS Setup](#macos-setup) for creating the required synthetic firmlink.
 
 ## License
 

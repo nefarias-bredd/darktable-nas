@@ -85,18 +85,30 @@ urlencode() {
 
 setup_keychain() {
     log_info "Setting up Keychain credentials for NAS..."
+    log_info "Local NAS IP: $NAS_HOST_LOCAL"
+    log_info "Tailscale IP: $NAS_HOST_TAILSCALE"
+    echo ""
     read -rp "NAS Username: " username
     read -rsp "NAS Password: " password
     echo
 
     # Store credentials for both local and Tailscale hosts
-    # -U updates existing entry if present
-    security add-internet-password -a "$username" -s "$NAS_HOST_LOCAL" -w "$password" -U 2>/dev/null || \
-        security add-internet-password -a "$username" -s "$NAS_HOST_LOCAL" -w "$password"
-    security add-internet-password -a "$username" -s "$NAS_HOST_TAILSCALE" -w "$password" -U 2>/dev/null || \
-        security add-internet-password -a "$username" -s "$NAS_HOST_TAILSCALE" -w "$password"
+    # -U updates existing entry if present, but may fail on first run
+    if security add-internet-password -a "$username" -s "$NAS_HOST_LOCAL" -w "$password" -U 2>/dev/null || \
+       security add-internet-password -a "$username" -s "$NAS_HOST_LOCAL" -w "$password" 2>/dev/null; then
+        log_info "Stored credentials for $NAS_HOST_LOCAL"
+    else
+        log_error "Failed to store credentials for $NAS_HOST_LOCAL"
+    fi
 
-    log_info "Credentials stored in Keychain"
+    if security add-internet-password -a "$username" -s "$NAS_HOST_TAILSCALE" -w "$password" -U 2>/dev/null || \
+       security add-internet-password -a "$username" -s "$NAS_HOST_TAILSCALE" -w "$password" 2>/dev/null; then
+        log_info "Stored credentials for $NAS_HOST_TAILSCALE"
+    else
+        log_error "Failed to store credentials for $NAS_HOST_TAILSCALE"
+    fi
+
+    log_info "Keychain setup complete"
 }
 
 # === HELPER FUNCTIONS ===
@@ -189,7 +201,10 @@ stop_tailscale() {
 
 is_mounted() {
     if [[ "$PLATFORM" == "macos" ]]; then
-        mount | grep -q " on ${NAS_MOUNT} "
+        # Resolve synthetic firmlinks to real path for mount check
+        local resolved_mount
+        resolved_mount=$(cd "$NAS_MOUNT" 2>/dev/null && pwd -P || echo "$NAS_MOUNT")
+        mount | grep -q " on ${resolved_mount} "
     else
         mountpoint -q "$NAS_MOUNT" 2>/dev/null
     fi
@@ -230,12 +245,22 @@ mount_nas() {
         local encoded_pass
         encoded_pass=$(urlencode "$KEYCHAIN_PASS")
 
-        if mount_smbfs "//${KEYCHAIN_USER}:${encoded_pass}@${NAS_HOST_LOCAL}${NAS_SHARE}" "$NAS_MOUNT" 2>/dev/null; then
+        log_debug "User: $KEYCHAIN_USER, Pass length: ${#KEYCHAIN_PASS}, Encoded length: ${#encoded_pass}"
+        log_debug "Mount URL: //${KEYCHAIN_USER}:***@${NAS_HOST_LOCAL}${NAS_SHARE}"
+
+        # Mount directly to specified path using mount_smbfs
+        mkdir -p "$NAS_MOUNT" 2>/dev/null || sudo mkdir -p "$NAS_MOUNT"
+
+        log_debug "Mounting to $NAS_MOUNT..."
+        local mount_output
+        if mount_output=$(mount_smbfs "//${KEYCHAIN_USER}:${encoded_pass}@${NAS_HOST_LOCAL}${NAS_SHARE}" "$NAS_MOUNT" 2>&1); then
             CONNECTION_TYPE="local"
             echo "$NAS_HOST_LOCAL" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
             log_info "Connected via local network"
             sleep 1
             return 0
+        else
+            log_debug "Local mount failed: $mount_output"
         fi
 
         # Fall back to Tailscale
@@ -245,12 +270,14 @@ mount_nas() {
         get_keychain_credentials "$NAS_HOST_TAILSCALE"
         encoded_pass=$(urlencode "$KEYCHAIN_PASS")
 
-        if mount_smbfs "//${KEYCHAIN_USER}:${encoded_pass}@${NAS_HOST_TAILSCALE}${NAS_SHARE}" "$NAS_MOUNT" 2>/dev/null; then
+        if mount_output=$(mount_smbfs "//${KEYCHAIN_USER}:${encoded_pass}@${NAS_HOST_TAILSCALE}${NAS_SHARE}" "$NAS_MOUNT" 2>&1); then
             CONNECTION_TYPE="tailscale"
             echo "$NAS_HOST_TAILSCALE" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
             log_info "Connected via Tailscale"
             sleep 1
             return 0
+        else
+            log_debug "Tailscale mount failed: $mount_output"
         fi
     else
         # Linux: Use mount -t cifs with credentials file
@@ -416,11 +443,6 @@ sync_from_nas() {
     log_info "Syncing database from NAS..."
     mkdir -p "$LOCAL_DB_DIR"
 
-    # Record NAS modification time for conflict detection
-    if [[ -f "$NAS_DB_DIR/library.db" ]]; then
-        get_file_mtime "$NAS_DB_DIR/library.db" > "$LOCAL_DB_DIR/.nas_sync_time"
-    fi
-
     # Sync ONLY database files (not config!)
     rsync -av \
         --include='library.db' \
@@ -436,6 +458,9 @@ sync_from_nas() {
         local db_size
         db_size=$(du -h "$LOCAL_DB_DIR/library.db" | cut -f1)
         log_info "Database synced (library.db: $db_size)"
+
+        # Record NAS modification time AFTER sync for conflict detection
+        get_file_mtime "$NAS_DB_DIR/library.db" > "$LOCAL_DB_DIR/.nas_sync_time"
     else
         log_error "Failed to sync database"
         return 1
@@ -704,8 +729,11 @@ main() {
     mount_nas || exit 1
 
     # Verify database directory exists
+    log_debug "Checking for database directory: $NAS_DB_DIR"
+    log_debug "Mount contents: $(ls "$NAS_MOUNT" 2>&1 | tr '\n' ' ')"
     if [[ ! -d "$NAS_DB_DIR" ]]; then
         log_error "NAS database directory not found: $NAS_DB_DIR"
+        log_info "Available directories: $(ls "$NAS_MOUNT" 2>&1)"
         exit 1
     fi
 
@@ -734,7 +762,7 @@ main() {
         --library "$LOCAL_DB_DIR/library.db" \
         --configdir "$LOCAL_CONFIG_DIR" \
         --conf run_crawler_on_start=FALSE \
-        "${dt_args[@]}" &
+        ${dt_args[@]+"${dt_args[@]}"} &
     DT_PID=$!
 
     log_info "darktable started (PID: $DT_PID)"
