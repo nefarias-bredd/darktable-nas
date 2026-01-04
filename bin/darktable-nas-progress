@@ -6,7 +6,11 @@ LOCAL_CACHE_DIR="${LOCAL_CACHE_DIR:-$HOME/.cache/darktable}"
 
 # Calculate cache hash for local database
 LOCAL_DB_PATH="$LOCAL_DB_DIR/library.db"
-CACHE_HASH=$(echo -n "$LOCAL_DB_PATH" | sha1sum | cut -d' ' -f1)
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    CACHE_HASH=$(echo -n "$LOCAL_DB_PATH" | shasum -a 1 | cut -d' ' -f1)
+else
+    CACHE_HASH=$(echo -n "$LOCAL_DB_PATH" | sha1sum | cut -d' ' -f1)
+fi
 CACHE_DIR="$LOCAL_CACHE_DIR/mipmaps-${CACHE_HASH}.d"
 
 # Get total photos from database

@@ -14,9 +14,6 @@ NAS_HOST_TAILSCALE="100.100.100.100"
 # SMB/CIFS share path on your NAS
 NAS_SHARE="/home"
 
-# Where to mount the NAS locally
-NAS_MOUNT="/mnt/synology"
-
 # Path to darktable database directory (relative to NAS_MOUNT)
 NAS_DB_PATH="darktable-db"
 
@@ -24,15 +21,22 @@ NAS_DB_PATH="darktable-db"
 NAS_PHOTOS_PATH="raws"
 
 # =============================================================================
-# CREDENTIALS
+# PLATFORM-SPECIFIC SETTINGS
 # =============================================================================
 
-# Path to CIFS credentials file
+# Where to mount the NAS locally
+# Default: /mnt/NAS on Linux, /Volumes/NAS on macOS
+NAS_MOUNT="/mnt/NAS"
+
+# Linux only: Path to CIFS credentials file
 # Create this file with:
 #   sudo mkdir -p /etc/cifs-credentials
-#   echo -e "username=YOUR_USER\npassword=YOUR_PASS" | sudo tee /etc/cifs-credentials/synology
-#   sudo chmod 600 /etc/cifs-credentials/synology
-CIFS_CREDENTIALS="/etc/cifs-credentials/synology"
+#   echo -e "username=YOUR_USER\npassword=YOUR_PASS" | sudo tee /etc/cifs-credentials/NAS
+#   sudo chmod 600 /etc/cifs-credentials/NAS
+CIFS_CREDENTIALS="/etc/cifs-credentials/NAS"
+
+# macOS: Credentials are stored in Keychain
+# Run: darktable-nas --setup-keychain
 
 # =============================================================================
 # LOCAL PATHS
