@@ -1,6 +1,6 @@
 # Maintainer: Your Name <your.email@example.com>
 pkgname=darktable-nas
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Launch darktable with NAS-based photo library - optimized for performance"
 arch=('any')

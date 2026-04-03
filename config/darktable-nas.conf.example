@@ -20,8 +20,14 @@ NAS_MOUNT="/mnt/synology"
 # Path to darktable database directory (relative to NAS_MOUNT)
 NAS_DB_PATH="darktable-db"
 
-# Path to photos directory (relative to NAS_MOUNT)
+# Path to raw photos directory (relative to NAS_MOUNT)
 NAS_PHOTOS_PATH="raws"
+
+# SMB share path for JPEG library (separate share from NAS_SHARE)
+NAS_JPEGS_SHARE="/photo"
+
+# Where to mount the JPEG library locally
+NAS_JPEGS_MOUNT="/mnt/synology-photo"
 
 # =============================================================================
 # CREDENTIALS

@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.1"
 
 # === DEFAULT CONFIGURATION ===
 # These can be overridden in ~/.config/darktable-nas/darktable-nas.conf
@@ -21,6 +21,8 @@ NAS_SHARE="${NAS_SHARE:-/home}"
 NAS_MOUNT="${NAS_MOUNT:-/mnt/synology}"
 NAS_DB_PATH="${NAS_DB_PATH:-darktable-db}"
 NAS_PHOTOS_PATH="${NAS_PHOTOS_PATH:-raws}"
+NAS_JPEGS_SHARE="${NAS_JPEGS_SHARE:-/photo}"
+NAS_JPEGS_MOUNT="${NAS_JPEGS_MOUNT:-/mnt/synology-photo}"
 
 CIFS_CREDENTIALS="${CIFS_CREDENTIALS:-/etc/cifs-credentials/synology}"
 
@@ -148,12 +150,15 @@ mount_nas() {
 
     log_info "Mounting NAS..."
     sudo mkdir -p "$NAS_MOUNT"
+    sudo mkdir -p "$NAS_JPEGS_MOUNT"
 
     # Try local network first
     log_debug "Trying local network mount ($NAS_HOST_LOCAL)..."
     local mount_opts="credentials=$CIFS_CREDENTIALS,$CIFS_OPTS_BASE,$CIFS_OPTS_LOCAL"
 
     if sudo mount -t cifs "//$NAS_HOST_LOCAL$NAS_SHARE" "$NAS_MOUNT" -o "$mount_opts" 2>/dev/null; then
+        sudo mount -t cifs "//$NAS_HOST_LOCAL$NAS_JPEGS_SHARE" "$NAS_JPEGS_MOUNT" -o "$mount_opts" 2>/dev/null || \
+            log_warn "Could not mount JPEG share ($NAS_JPEGS_SHARE) at $NAS_JPEGS_MOUNT"
         CONNECTION_TYPE="local"
         echo "$NAS_HOST_LOCAL" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
         log_info "Connected via local network"
@@ -168,6 +173,8 @@ mount_nas() {
     mount_opts="credentials=$CIFS_CREDENTIALS,$CIFS_OPTS_BASE,$CIFS_OPTS_TAILSCALE"
 
     if sudo mount -t cifs "//$NAS_HOST_TAILSCALE$NAS_SHARE" "$NAS_MOUNT" -o "$mount_opts" 2>/dev/null; then
+        sudo mount -t cifs "//$NAS_HOST_TAILSCALE$NAS_JPEGS_SHARE" "$NAS_JPEGS_MOUNT" -o "$mount_opts" 2>/dev/null || \
+            log_warn "Could not mount JPEG share ($NAS_JPEGS_SHARE) at $NAS_JPEGS_MOUNT"
         CONNECTION_TYPE="tailscale"
         echo "$NAS_HOST_TAILSCALE" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
         log_info "Connected via Tailscale"
@@ -183,6 +190,7 @@ unmount_nas() {
     log_info "Unmounting NAS..."
     sync
     sleep 1
+    sudo umount "$NAS_JPEGS_MOUNT" 2>/dev/null || true
     sudo umount "$NAS_MOUNT" 2>/dev/null || log_warn "Could not unmount cleanly"
     sudo rm -f /var/run/darktable-nas-mount-ip
 }
