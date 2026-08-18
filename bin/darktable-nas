@@ -155,16 +155,31 @@ mount_nas() {
     # Try local network first
     log_debug "Trying local network mount ($NAS_HOST_LOCAL)..."
     local mount_opts="credentials=$CIFS_CREDENTIALS,$CIFS_OPTS_BASE,$CIFS_OPTS_LOCAL"
+    local err_file="/tmp/darktable-nas-mount.err"
 
-    if sudo mount -t cifs "//$NAS_HOST_LOCAL$NAS_SHARE" "$NAS_MOUNT" -o "$mount_opts" 2>/dev/null; then
-        sudo mount -t cifs "//$NAS_HOST_LOCAL$NAS_JPEGS_SHARE" "$NAS_JPEGS_MOUNT" -o "$mount_opts" 2>/dev/null || \
-            log_warn "Could not mount JPEG share ($NAS_JPEGS_SHARE) at $NAS_JPEGS_MOUNT"
-        CONNECTION_TYPE="local"
-        echo "$NAS_HOST_LOCAL" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
-        log_info "Connected via local network"
-        sleep 1
-        return 0
-    fi
+    # Retry local mount up to 3 times to handle NAS wake-up delays
+    local attempt
+    for attempt in 1 2 3; do
+        if sudo mount -t cifs "//$NAS_HOST_LOCAL$NAS_SHARE" "$NAS_MOUNT" -o "$mount_opts" 2>"$err_file"; then
+            sudo mount -t cifs "//$NAS_HOST_LOCAL$NAS_JPEGS_SHARE" "$NAS_JPEGS_MOUNT" -o "$mount_opts" 2>"$err_file" || \
+                log_warn "Could not mount JPEG share ($NAS_JPEGS_SHARE) at $NAS_JPEGS_MOUNT"
+            CONNECTION_TYPE="local"
+            echo "$NAS_HOST_LOCAL" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
+            log_info "Connected via local network"
+            sleep 1
+            return 0
+        else
+            local err_msg
+            err_msg=$(cat "$err_file")
+            if [[ $attempt -lt 3 ]]; then
+                log_warn "Local mount attempt $attempt failed. Error: $err_msg"
+                log_info "Retrying in 5s..."
+                sleep 5
+            else
+                log_error "Local mount failed after 3 attempts. Error: $err_msg"
+            fi
+        fi
+    done
 
     # Fall back to Tailscale
     log_info "Local network unavailable, trying Tailscale..."
@@ -172,14 +187,16 @@ mount_nas() {
 
     mount_opts="credentials=$CIFS_CREDENTIALS,$CIFS_OPTS_BASE,$CIFS_OPTS_TAILSCALE"
 
-    if sudo mount -t cifs "//$NAS_HOST_TAILSCALE$NAS_SHARE" "$NAS_MOUNT" -o "$mount_opts" 2>/dev/null; then
-        sudo mount -t cifs "//$NAS_HOST_TAILSCALE$NAS_JPEGS_SHARE" "$NAS_JPEGS_MOUNT" -o "$mount_opts" 2>/dev/null || \
+    if sudo mount -t cifs "//$NAS_HOST_TAILSCALE$NAS_SHARE" "$NAS_MOUNT" -o "$mount_opts" 2>"$err_file"; then
+        sudo mount -t cifs "//$NAS_HOST_TAILSCALE$NAS_JPEGS_SHARE" "$NAS_JPEGS_MOUNT" -o "$mount_opts" 2>"$err_file" || \
             log_warn "Could not mount JPEG share ($NAS_JPEGS_SHARE) at $NAS_JPEGS_MOUNT"
         CONNECTION_TYPE="tailscale"
         echo "$NAS_HOST_TAILSCALE" | sudo tee /var/run/darktable-nas-mount-ip > /dev/null
         log_info "Connected via Tailscale"
         sleep 1
         return 0
+    else
+        log_error "Tailscale mount failed. Error: $(cat "$err_file")"
     fi
 
     log_error "Failed to mount NAS"
